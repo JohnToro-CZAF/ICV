@@ -7,6 +7,7 @@ from collections import defaultdict
 import torch
 import numpy as np
 import datasets
+from typing import List, Tuple
 
 from anchor import hf_datasets_root
 from tasks.loader import TokenizedForStyleRightPad
@@ -305,6 +306,30 @@ class BaseProbInference:
         directions = [(pca.components_[i].sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1)) for i in range(len(pca.components_))]
         return directions, (neg_emb).view(hidden_states[demonstration_id][0].size(0), hidden_states[demonstration_id][0].size(1))
     
+    @staticmethod
+    def obtain_icv_vllm(hidden_states: List[Tuple[torch.Tensor, torch.Tensor]], rank=1):
+        num_demonstration = len(hidden_states)
+        neg_all = []
+        pos_all = []
+        hidden_states_all = []
+        for demonstration_id in range(num_demonstration):
+            h = hidden_states[demonstration_id][1].view(-1) - hidden_states[demonstration_id][0].view(-1) # \delta h = h_pos - h_neg [dim]
+            hidden_states_all.append(h)
+            neg_all.append(hidden_states[demonstration_id][0].view(-1))
+            pos_all.append(hidden_states[demonstration_id][1].view(-1))
+        fit_data = torch.stack(hidden_states_all) # all the deltas [n_example, numlayers*dim]
+        neg_emb = torch.stack(neg_all).mean(0) # mean of all negative examples [numlayers*dim]
+        pos_emb = torch.stack(pos_all).mean(0) # mean of all positive examples [numlayers*dim]
+        # print(fit_data.size())
+        # print(neg_emb.size())
+        # print(pos_emb.size())
+        pca = PCA(n_components=rank).to(fit_data.device).fit(fit_data.float())
+        eval_data =  pca.transform(fit_data.float())
+        h_pca = pca.inverse_transform(eval_data) 
+        direction = (pca.components_.sum(dim=0,keepdim=True) + pca.mean_).mean(0).view(hidden_states[demonstration_id][0].size(0), hidden_states[demonstration_id][0].size(1))#h_pca.mean(0).view(hidden_states[demonstration_id][0].size(0), hidden_states[demonstration_id][0].size(1))
+        directions = [(pca.components_[i].sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1)) for i in range(len(pca.components_))]
+        return directions
+    
 
 class RewardProbInference(BaseProbInference):
     def __init__(self, prompt_version):
@@ -314,6 +339,34 @@ class RewardProbInference(BaseProbInference):
     def get_reward(model, inputs, rewards, rank=1):
         print("Getting reward ICV")
         hidden_states = RewardProbInference.get_hiddenstates(model, inputs)
+        rewards = [reward / sum(rewards) for reward in rewards]
+        num_demonstration = len(hidden_states)
+
+        hidden_states_all = []
+        weighted_hidden_states_all = []
+
+        for demonstration_id in range(num_demonstration):
+            h = hidden_states[demonstration_id][1].view(-1) - hidden_states[demonstration_id][0].view(-1)
+            hidden_states_all.append(h)
+            
+            # Weighted by rewards (TODO: should we normalize the rewards or give negative rewards?)
+            weighted_h = rewards[demonstration_id] * h
+            weighted_hidden_states_all.append(weighted_h)
+        fit_data = torch.stack(hidden_states_all)
+        weighted_fit_data = torch.stack(weighted_hidden_states_all)
+        pca = PCA(n_components=rank).fit(weighted_fit_data.float())
+        print(pca.components_.shape)
+        eval_data = pca.transform(fit_data.float())
+        h_pca = pca.inverse_transform(eval_data)
+        
+        direction = (pca.components_.sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1))
+        directions = [(pca.components_[i].sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1)) for i in range(len(pca.components_))]
+
+        return directions
+    
+    @staticmethod
+    def obtain_icv_rewarded_vllm(hidden_states: List[Tuple[torch.Tensor, torch.Tensor]], rewards, rank=1):
+        print("Getting reward ICV")
         rewards = [reward / sum(rewards) for reward in rewards]
         num_demonstration = len(hidden_states)
 

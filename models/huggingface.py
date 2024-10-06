@@ -48,6 +48,7 @@ def build_model(model_type, model_size, in_8bit):
         device_map="auto",
         load_in_8bit=in_8bit,
         token="",
+        torch_dtype="float16",
     )
     model.eval()
     return model

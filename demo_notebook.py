@@ -1,4 +1,6 @@
 import os
+import re
+import tqdm
 import gguf
 import torch
 import numpy as np
@@ -10,6 +12,162 @@ from utils.pca import PCA
 from vllm import EngineArgs, LLMEngine, SamplingParams
 from vllm.control_vectors.request import ControlVectorRequest
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+from datasets import load_dataset
+from typing import Dict, List, Union
+
+from sllm.value_functions.step_wise import StepWiseValueFunction
+from sllm.envs.math.utils import is_equiv
+from sllm.envs.base_env import BaseEnv
+
+ANS_RE = re.compile("\\\\boxed{(.*)}")
+
+class MATHEnv(BaseEnv):
+    def __init__(self, config, logger):
+        super().__init__()
+        limit = config.limit
+        prm_dataset = load_dataset('lighteval/MATH')
+        test = prm_dataset['test']
+        # suffle the dataset
+        test = test.shuffle(seed=42)
+        filter_test = []
+        data_statistic = {
+            "1": {}, 
+            "2": {},
+            "3": {},
+            "4": {},
+            "5": {}
+        }
+        for i in range(len(test)):
+            full_ans = test[i]["solution"]
+            match = ANS_RE.search(full_ans)
+            if match:
+                level = test[i]["level"].split(" ")[1]
+                prob_type = test[i]["type"]
+                if prob_type in data_statistic[level]:
+                    data_statistic[level][prob_type] += 1
+                else:
+                    data_statistic[level][prob_type] = 1
+                data = {
+                    "problem": test[i]["problem"],
+                    "solution": match.group(1).strip(),
+                    "full_solution": full_ans,
+                    "level": level
+                }
+                filter_test.append(data)
+        self.prm_dataset = [problem for problem in filter_test if problem["level"] == str(config.level)][:limit]
+        self.problem_idx = 0
+        self.problem = None
+        self.results = []
+        self.logger = logger
+        self.experiment_name = "default"
+
+    @property
+    def problems(self):
+        return self.prm_dataset
+
+    def set_problem(self, idx):
+        self.problem_idx = idx
+        self.problem = self.prm_dataset[idx]
+
+    def get_problem(self, idx):
+        return self.prm_dataset[idx]
+    
+    def get_answer(self, idx):
+        return self.prm_dataset[idx]
+
+    def get_problem_statement(self):
+        return self.problem["problem"]
+
+    def get_problem_idx(self):
+        return self.problem_idx
+    
+    def check_extracted(self, extracted_solution, problem):
+        if extracted_solution == "":
+            return False
+        return is_equiv(extracted_solution, problem["solution"])
+
+    def extract_answer(self, proposed_solutions: Union[List[str], str]):
+        answers = []
+        if isinstance(proposed_solutions, str):
+            solution = proposed_solutions
+            answer_prefix = "The answer is: "
+            if answer_prefix in solution:
+                start = solution.find(answer_prefix) + len(answer_prefix)
+                end_id = None
+                for id in range(start, len(solution)):
+                    if solution[id] == "к":
+                        end_id = id
+                        break
+                final_answer = solution[start:end_id]
+                final_answer = final_answer.replace("ки", "")
+                final_answer = final_answer.strip()
+            else:
+                final_answer = ""
+            return final_answer
+        
+        for solution in proposed_solutions:
+            answer_prefix = "The answer is: "
+            if answer_prefix in solution:
+                start = solution.find(answer_prefix) + len(answer_prefix)
+                end_id = None
+                for id in range(start, len(solution)):
+                    if solution[id] == "к":
+                        end_id = id
+                        break
+                final_answer = solution[start:end_id]
+                final_answer = final_answer.replace("ки", "")
+                final_answer = final_answer.strip()
+            else:
+                final_answer = ""
+            answers.append(final_answer)
+        return answers
+        
+    def accumulate_result(self, result: Dict):
+        self.results.append(result)
+    
+    def finalize(self):
+        self.result = {"correct": sum([result["is_correct"] for result in self.results]), "total": len(self.results)}
+        if "n_generated_token" in self.results[0]:
+            self.result["n_generated_token"] = sum([result["n_generated_token"] for result in self.results])
+            self.result["avg_generated_token"] = self.result["n_generated_token"] / self.result["total"]
+    
+class Config:
+    def __init__(self):
+        self.limit = 5000
+        self.level = 5
+
+def extract_answer(text: str) -> str:
+    ANS_RE = re.compile("\\\\boxed{(.*)}")
+    match = ANS_RE.search(text)
+    answer = match.group(1) if match else ''
+    return answer
+    
+cfg = Config()
+env = MATHEnv(cfg, logger=None)
+
+class RewardConfig:
+    def __init__(self):
+        self.abc = False
+        self.model = "peiyi9979/math-shepherd-mistral-7b-prm"
+        self.reward_device = "cuda:1"
+        self.good_token = "+"
+        self.bad_token = "-"
+        self.value_token = "ки"
+
+reward_model = StepWiseValueFunction(RewardConfig())
+
+def compute_reward(problem, steps, current_step, value_token = "ки"):
+    prompt = problem
+    for idx, step in enumerate(steps):
+        if idx == 0:
+            prompt += (" " + step.strip() + f". {value_token} ")
+        elif idx < len(steps) - 1:
+            prompt += (step.strip() + f". {value_token} ")
+        else:
+            prompt += step.strip() + f" {value_token}"
+    rewards = reward_model.compute([prompt])[0]
+    return rewards[current_step:].mean()
 
 def tokenize_each_demonstration(demonstration_list, tokenizer, dataset_name=None, prefix = None):
     def strip_special_characters(input_string):
@@ -32,11 +190,14 @@ cv_path = "/datadrive5/huypn16/ICV/controlvector.gguf"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 SEED = 42
 
-def sampling_icv(engine, text):
+def sampling_icv(engine, steps):
+    text = "".join(steps)
+    text += f"### Step {len(steps)}: "
     prompts = [(text,
                 SamplingParams(temperature=0.65,
-                               max_tokens=100),
-                ControlVectorRequest("chaotic", 1, cv_path, scale=1.0))]
+                               max_tokens=600,
+                               stop=["###"]),
+                ControlVectorRequest("chaotic", 1, cv_path, scale=0.12))]
 
     request_id = 0
     results = set()
@@ -70,9 +231,11 @@ def export_gguf(path: os.PathLike[str] | str, directions: list[torch.Tensor], mo
     writer.write_tensors_to_file()
     writer.close()
 
-def sampling(engine, text) -> Union[str, torch.Tensor]:
+def sampling(engine, steps:List[str]) -> Union[str, torch.Tensor]:
     # first prompt with a control vector and second without.
-    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=100), None)]
+    text  = "".join(steps)
+    text += f"### Step {len(steps)}: "
+    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=700, stop=["###"]), None)]
     request_id = 0
     results = set()
     while prompts or engine.has_unfinished_requests():
@@ -89,55 +252,102 @@ def sampling(engine, text) -> Union[str, torch.Tensor]:
             if request_output.finished or request_output.outputs[0].prompt_hidden_states != None:
                 results.add((request_output.request_id, request_output.outputs[0].text, request_output.outputs[0].hidden_states, request_output.outputs[0].prompt_hidden_states if request_output.outputs[0].prompt_hidden_states != None else None))
     prompt_hidden = None
-    sampled_text  = None
+    sampled_text  = ""
     sampled_hidden = None
     for result in results:
         if result[-1] is not None:
             prompt_hidden = result[-1]
         else:
-            sampled_text = result[1]
+            sampled_text = result[1]                                                    
             sampled_hidden = result[2]
     # assert prompt_hidden is not None and sampled_text is not None
+    assert sampled_text is not None, f"Sampled text is None, results: {results}"
+    # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
     return sampled_text, prompt_hidden, sampled_hidden
 
-def test_cv_adapter():
-    engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True, gpu_memory_utilization=0.95, return_hidden_states=True)
-    engine = LLMEngine.from_engine_args(engine_args)
-    n_samples = 4
-    n_steps = 4
-    directions = []
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH,
-        device_map="auto",
-        token="",
-        torch_dtype="float16",
-    )
-    model.eval()
-    TaskHandler = load_task("reward")
-    task_agent = TaskHandler("1.0.0")
-    task_agent.set_seed(SEED)
-    steps = ["Solving the following mathematical problem. Problem: Calculate the following expression: (10222 + 23123123 * 4 - 1 ) * 5 - 6. Step 1:"]
-    for _ in range(n_steps):
+engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True, gpu_memory_utilization=0.95, return_hidden_states=True, disable_log_stats=True)
+engine = LLMEngine.from_engine_args(engine_args)
+n_samples = 4
+num_problems = 100
+SEED = 42
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH,
+    device_map="auto",
+    token="",
+    torch_dtype="float16",
+)
+model.eval()
+TaskHandler = load_task("reward")
+task_agent = TaskHandler("1.0.0")
+
+example = """To solve for the perimeter of pentagon \\(ABCDP\\), we need to determine the lengths of all its sides. 
+            We are given that \\(P\\) is the midpoint of \\(\\overline{BD}\\), \\(AP = BP = 4\\), \\(\\overline{AP} \\perp \\overline{BD}\\), \\(\\overline{BD} \\perp \\overline{DC}\\), and \\(\\overline{AB} \\perp \\overline{BC}\\).\n\n
+            ### Step 1: Determine the coordinate
+            ### Step 2: Determine the length of \\(\\overline{BD}\\)\nSince \\(P\\) is the midpoint, the coordinates of \\(P\\) being \\((4, 0)\\) imply:\n\\[\nP = \\left( \\frac{4 + 4}{2}, \\frac{y_B + (-y_B)}{2} \\right) = (4, 0)\n\\]\nThis confirms the midpoint calculation.\n\n
+            ### Step 3: Determine the length of \\(\\overline{BD}\\)\nUsing the distance formula for \\(\\overline{BD}\\):\n\\[\nBD = \\sqrt{(4 - 4)^2 + (y_B - (-y_B))^2} = \\sqrt{0 + (2y_B)^2} = 2y_B\n\\]\n\nGivenes of points\nGiven that \\(AP = BP = 4\\) and \\(\\overline{AP} \\perp \\overline{BD}\\), we place point \\(A\\) at the origin \\((0, 0)\\) and point \\(P\\) at \\((4, 0)\\) since \\(AP\\) is horizontal and equal to 4.\n\nSince \\(P\\) is the midpoint of \\(\\overline{BD}\\), we denote the coordinates of \\(B\\) and \\(D\\) as follows:\n- Let \\(B = (4, y_B)\\)\n- Let \\(D = (4, -y_B)\\)\n\n \\(BP = 4\\):\n\\[\nBP = \\sqrt{(4 - 4)^2 + (y_B - 0)^2} = y_B = 4\n\\]\n\nThus, \\(BD = 2y_B = 2 \\times 4 = 8\\).\n\n
+            ### Step 4: Determine the length of \\(\\overline{DC}\\)\nSince \\(\\overline{BD} \\perp \\overline{DC}\\), \\(D = (4, -4)\\) and \\(C\\) is directly below \\(D\\) with the same x-coordinate, we place \\(C\\) at \\((4, -8)\\).\n\n
+            ### Step 5: Determine the length of \\(\\overline{BC}\\)\nUsing the distance formula for \\(\\overline{BC}\\):\n\\[\nBC = \\sqrt{(4 - 4)^2 + (-8 - 4)^2} = \\sqrt{0 + (-12)^2} = 12\n\\]\n\n
+            ### Step 6: Determine the length of \\(\\overline{AB}\\)\nSince \\(\\overline{AB} \\perp \\overline{BC}\\) and \\(A = (0, 0)\\), \\(B = (4, 4)\\):\n\\[\nAB = \\sqrt{(4 - 0)^2 + (4 - 0)^2} = \\sqrt{16 + 16} = \\sqrt{32} = 4\\sqrt{2}\n\\]\n\n
+            ### Step 7: Calculate the perimeter of pentagon \\(ABCDP\\)\nThe perimeter is the sum of all sides:\n\\[\nAB + BP + PD + DC + CA\n\\]\n\nWe already know:\n\\[\nAB = 4\\sqrt{2}, \\quad BP = 4, \\quad PD = 4, \\quad DC = 12, \\quad CA = 4\n\\]\n\nThus, the perimeter is:\n\\[\n4\\sqrt{2} + 4 + 4 + 12 + 4 = 4\\sqrt{2} + 24\n\\]\n\n
+            ### Final Answer\n\\[\n\\boxed{4\\sqrt{2} + 24}\n\\]
+            """
+            
+prompt = "You are a great mathematics solver that consider reflection, analogy and multiple approaches to solve the problem. Here is an example of a formatted solution to a math problem: \n\n"
+solved_prompt = ".Solve the following math problem step-by-step. \n\nProblem: {problem} \n\nSolution:"
+task_agent.set_seed(SEED)
+
+def process_problem_icv_prefix(problem_id):
+    problem = env.get_problem(problem_id)
+    print("Problem: ", problem["problem"], "Solution: ", problem["solution"])
+    steps = [prompt + example + solved_prompt + problem["problem"] + "\n\n"]
+    step_prefix = "### Step "
+    solved = False
+    while not solved:
         hidden_states = []
         possible_steps = []
+        print("Steps: ", steps)
         for _ in range(n_samples):
-            text, xs, ys = sampling(engine, "".join(steps))
+            text, xs, ys = sampling(engine, steps)
             # xs: prompt_hidden_states, ys: sampled_hidden_states
-            x, y = xs[-1], ys[-1] # taking the last token
-            hidden_states.append((x, y))
             possible_steps.append(text)
             print("====================================")
             print(text)
             print("====================================")
-        
+            print(xs.shape)
+            print(ys.shape)
+            x, y = xs[-1], ys[-1] # taking the last token
+            hidden_states.append((x, y))
+        rewards = []
+        # for text in possible_steps:
+        #     rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
+        # icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards)
         icvs = task_agent.obtain_icv_vllm(hidden_states)
         export_gguf(cv_path, icvs[0], model) # export the control vector for the first PCA axis only
         # resampling with ICV
-        result = sampling_icv(engine, "".join(steps))
-        print("Next step ICV:", result[1][1])
-        steps.append(result[1][1])
+        result = sampling_icv(engine, steps)
+        print("Result: ", result)
+        idx = 0
+        for id, res in enumerate(result):
+            if res[-1] == None:
+                idx = id
+        if "\\box" in result[idx][1]:
+            solved = True
+            print("Solved")
+        print("Next step ICV:", result[idx][1])
+        if result[idx][1] is not None:
+            steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
+        else:
+            steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[0])
     
-    print(steps)
-    
+    answer = extract_answer("".join(steps))
+    correct = env.check_extracted(answer, problem)
+    return int(correct)
+
 if __name__ == "__main__":
-    test_cv_adapter()
+    acc = 0
+    for problem_id in range(num_problems):
+        correct = process_problem_icv_prefix(problem_id)
+        acc += correct
+        print(f"Accuracy: {acc / (problem_id+1)}")
+
+    print(f"Accuracy: {acc / num_problems}")

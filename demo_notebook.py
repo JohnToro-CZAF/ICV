@@ -15,6 +15,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from datasets import load_dataset
 from typing import Dict, List, Union
+import concurrent
 
 from sllm.value_functions.step_wise import StepWiseValueFunction
 from sllm.envs.math.utils import is_equiv
@@ -265,6 +266,49 @@ def sampling(engine, steps:List[str]) -> Union[str, torch.Tensor]:
     # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
     return sampled_text, prompt_hidden, sampled_hidden
 
+def multisampling(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tensor]:
+    # first prompt with a control vector and second without.
+    text  = "".join(steps)
+    text += f"### Step {len(steps)}: "
+    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=700, stop=["###"]), None) for _ in range(nsteps)]
+    request_id = 0
+    results = set()
+    while prompts or engine.has_unfinished_requests():
+        if prompts:
+            prompt, sampling_params, cv_request = prompts.pop(0)
+            engine.add_request(str(request_id),
+                               prompt,
+                               sampling_params,
+                               control_vector_request=cv_request)
+            request_id += 1
+
+        request_outputs = engine.step()
+        for request_output in request_outputs:
+            if request_output.finished or request_output.outputs[0].prompt_hidden_states != None:
+                results.add((request_output.request_id, request_output.outputs[0].text, request_output.outputs[0].hidden_states, request_output.outputs[0].prompt_hidden_states if request_output.outputs[0].prompt_hidden_states != None else None))
+    
+    responses = []
+    for req_id in range(nsteps):
+        req_results = []
+        for res in results:
+            if res[0] == str(req_id):
+                req_results.append(res)
+        # print("Req_id: ", req_id, "Req_results: ", req_results)
+        prompt_hidden = None
+        sampled_text  = ""
+        sampled_hidden = None
+        for result in req_results:
+            if result[-1] is not None:
+                prompt_hidden = result[-1]
+            else:
+                sampled_text = result[1]                                                    
+                sampled_hidden = result[2]
+        # assert prompt_hidden is not None and sampled_text is not None
+        assert sampled_text is not None, f"Sampled text is None, results: {results}"
+        # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
+        responses.append((sampled_text, prompt_hidden, sampled_hidden))
+    return responses
+
 engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True, gpu_memory_utilization=0.95, return_hidden_states=True, disable_log_stats=True)
 engine = LLMEngine.from_engine_args(engine_args)
 n_samples = 4
@@ -306,17 +350,43 @@ def process_problem_icv_prefix(problem_id):
         hidden_states = []
         possible_steps = []
         print("Steps: ", steps)
-        for _ in range(n_samples):
-            text, xs, ys = sampling(engine, steps)
-            # xs: prompt_hidden_states, ys: sampled_hidden_states
+        
+        # def sampling_func():
+        #     text, xs, ys = sampling(engine, steps)
+        #     return text, xs, ys
+        
+        # with concurrent.futures.ThreadPoolExecutor() as executor:
+        #     futures = [executor.submit(sampling_func) for _ in range(n_samples)]
+        #     # Collect the results as they complete
+        #     for future in concurrent.futures.as_completed(futures):
+        #         result = future.result()
+        #         if result:
+        #             text, xs, ys = result
+        #             possible_steps.append(text)
+        #             x,y = xs[-1], ys[-1]
+        #             hidden_states.append((x, y))
+        import time
+        t0 = time.time()
+        u = multisampling(engine, steps, n_samples)
+        for s in u:
+            text, xs, ys = s
+            # text, x, y = s
             possible_steps.append(text)
-            print("====================================")
-            print(text)
-            print("====================================")
-            print(xs.shape)
-            print(ys.shape)
-            x, y = xs[-1], ys[-1] # taking the last token
+            x,y = xs[-1], ys[-1]
             hidden_states.append((x, y))
+        t1 = time.time()
+        print("Time: ", t1 - t0)
+        # for _ in range(n_samples):
+        #     text, xs, ys = sampling(engine, steps)
+        #     # xs: prompt_hidden_states, ys: sampled_hidden_states
+        #     possible_steps.append(text)
+        #     print("====================================")
+        #     print(text)
+        #     print("====================================")
+        #     print(xs.shape)
+        #     print(ys.shape)
+        #     x, y = xs[-1], ys[-1] # taking the last token
+        #     hidden_states.append((x, y))
         rewards = []
         # for text in possible_steps:
         #     rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
@@ -325,12 +395,12 @@ def process_problem_icv_prefix(problem_id):
         export_gguf(cv_path, icvs[0], model) # export the control vector for the first PCA axis only
         # resampling with ICV
         result = sampling_icv(engine, steps)
-        print("Result: ", result)
+        # print("Result: ", result)
         idx = 0
         for id, res in enumerate(result):
             if res[-1] == None:
                 idx = id
-        if "\\box" in result[idx][1]:
+        if "\\box" in result[idx][1] or "box" in result[idx][1]:
             solved = True
             print("Solved")
         print("Next step ICV:", result[idx][1])
@@ -339,13 +409,14 @@ def process_problem_icv_prefix(problem_id):
         else:
             steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[0])
     
-    answer = extract_answer("".join(steps))
+    answer = extract_answer("".join(steps[1:]))
+    print("Answer: ", answer, "Solution: ", problem["solution"])
     correct = env.check_extracted(answer, problem)
     return int(correct)
 
 if __name__ == "__main__":
     acc = 0
-    for problem_id in range(num_problems):
+    for problem_id in tqdm.tqdm(range(28,num_problems)):
         correct = process_problem_icv_prefix(problem_id)
         acc += correct
         print(f"Accuracy: {acc / (problem_id+1)}")

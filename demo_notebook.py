@@ -374,8 +374,8 @@ def process_problem_icv_prefix(problem_id):
             # text, x, y = s
             possible_steps.append(text)
             x,y = xs[-1], ys[-1]
-            # hidden_states.append((x,y))
-            hidden_states.append(y)
+            hidden_states.append((x,y))
+            # hidden_states.append(y)
         t1 = time.time()
         print("Time: ", t1 - t0)
         # for _ in range(n_samples):
@@ -428,7 +428,7 @@ def process_problem_icv_prefix(problem_id):
                 print("Steered reward: ", max(icv_rewards), "Highest base reward: ", max(rewards))
                 print("We are steering to base step")
         else:
-            steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[0])
+            steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[np.argmax(rewards)])
     
     answer = extract_answer("".join(steps[1:]))
     print("Answer: ", answer, "Solution: ", problem["solution"])

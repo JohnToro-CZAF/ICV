@@ -313,6 +313,7 @@ engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True, gpu_memor
 engine = LLMEngine.from_engine_args(engine_args)
 n_samples = 4
 num_problems = 100
+n_components = 4
 SEED = 42
 model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH,
@@ -391,35 +392,41 @@ def process_problem_icv_prefix(problem_id):
         rewards = []
         for text in possible_steps:
             rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
-        icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards)
+        # icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards, n_components)
+        icvs = task_agent.obtain_icv_vllm(hidden_states, n_components)
         # icvs = task_agent.obtain_icv_vllm(hidden_states)
-        export_gguf(cv_path, icvs[0], model) # export the control vector for the first PCA axis only
-        # resampling with ICV
-        result = sampling_icv(engine, steps)
-        # print("Result: ", result)
-        idx = 0
-        for id, res in enumerate(result):
-            if res[-1] == None:
-                idx = id
-        if "\\box" in result[idx][1] or "box" in result[idx][1]:
-            solved = True
-            print("Solved")
-        # print("Next step ICV:", result[idx][1])
-        if result[idx][1] is not None:
-            reward_steered = compute_reward(problem["problem"], steps + [result[idx][1]], -1).item()
-            highest_reward_base = max(rewards)
-            highest_reward_base_idx = rewards.index(highest_reward_base)
-            
+        icv_steps = []
+        icv_rewards = []
+        for direction in icvs:
+            export_gguf(cv_path, direction, model) # export the control vector for the first PCA axis only
+            result = sampling_icv(engine, steps)
+            idx = 0
+            for id, res in enumerate(result):
+                if res[-1] == None:
+                    idx = id
+            if "\\box" in result[idx][1] or "box" in result[idx][1]:
+                solved = True
+                print("Solved")
+            if result[idx][1] is not None:
+                icv_step = result[idx][1]
+                icv_steps.append(icv_step)
+                icv_reward = compute_reward(problem["problem"], steps + [icv_step], -1).item()
+                icv_rewards.append(icv_reward)
+        
+        icv_max_direction = icv_rewards.index(max(icv_rewards))
+        print("Max direction: ", icv_max_direction)
+        print("Max reward: ", max(icv_rewards))
+        icv_max_step = icv_steps[icv_max_direction]
+        
+        if icv_max_step is not None:
             steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
-            
-            if reward_steered > highest_reward_base:
-                print("Steered reward: ", reward_steered, "Highest base reward: ", highest_reward_base)
+        
+            if max(icv_rewards) > max(rewards):
+                print("Steered reward: ", max(icv_rewards), "Highest base reward: ", max(rewards))
                 print("We are steering the model to the right direction")
-                # steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
             else:
-                print("Steered reward: ", reward_steered, "Highest base reward: ", highest_reward_base)
+                print("Steered reward: ", max(icv_rewards), "Highest base reward: ", max(rewards))
                 print("We are steering to base step")
-                # steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[highest_reward_base_idx])
         else:
             steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[0])
     

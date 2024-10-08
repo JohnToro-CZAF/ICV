@@ -186,7 +186,7 @@ def tokenize_each_demonstration(demonstration_list, tokenizer, dataset_name=None
     return tokenized_demonstration_list
 
 
-MODEL_PATH = "Qwen/Qwen2.5-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen2.5-1.5B-Instruct"
 cv_path = "/datadrive5/huypn16/ICV/controlvector.gguf"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
 SEED = 42
@@ -216,7 +216,7 @@ def sampling_icv(engine, steps):
             if request_output.finished or request_output.outputs[0].prompt_hidden_states != None:
                 results.add((request_output.request_id, request_output.outputs[0].text, request_output.outputs[0].hidden_states.shape, request_output.outputs[0].prompt_hidden_states.shape if request_output.outputs[0].prompt_hidden_states != None else None))
     
-    print(results)
+    # print(results)
     return list(results)
 
 def export_gguf(path: os.PathLike[str] | str, directions: list[torch.Tensor], model):
@@ -343,13 +343,13 @@ task_agent.set_seed(SEED)
 def process_problem_icv_prefix(problem_id):
     problem = env.get_problem(problem_id)
     print("Problem: ", problem["problem"], "Solution: ", problem["solution"])
-    steps = [prompt + example + solved_prompt + problem["problem"] + "\n\n"]
+    steps = [prompt + example + solved_prompt.format(problem=problem["problem"]) + "\n\n"]
     step_prefix = "### Step "
     solved = False
     while not solved:
         hidden_states = []
         possible_steps = []
-        print("Steps: ", steps)
+        # print("Steps: ", steps)
         
         # def sampling_func():
         #     text, xs, ys = sampling(engine, steps)
@@ -373,7 +373,8 @@ def process_problem_icv_prefix(problem_id):
             # text, x, y = s
             possible_steps.append(text)
             x,y = xs[-1], ys[-1]
-            hidden_states.append((x, y))
+            # hidden_states.append((x,y))
+            hidden_states.append(y)
         t1 = time.time()
         print("Time: ", t1 - t0)
         # for _ in range(n_samples):
@@ -388,10 +389,10 @@ def process_problem_icv_prefix(problem_id):
         #     x, y = xs[-1], ys[-1] # taking the last token
         #     hidden_states.append((x, y))
         rewards = []
-        # for text in possible_steps:
-        #     rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
-        # icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards)
-        icvs = task_agent.obtain_icv_vllm(hidden_states)
+        for text in possible_steps:
+            rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
+        icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards)
+        # icvs = task_agent.obtain_icv_vllm(hidden_states)
         export_gguf(cv_path, icvs[0], model) # export the control vector for the first PCA axis only
         # resampling with ICV
         result = sampling_icv(engine, steps)
@@ -403,9 +404,22 @@ def process_problem_icv_prefix(problem_id):
         if "\\box" in result[idx][1] or "box" in result[idx][1]:
             solved = True
             print("Solved")
-        print("Next step ICV:", result[idx][1])
+        # print("Next step ICV:", result[idx][1])
         if result[idx][1] is not None:
+            reward_steered = compute_reward(problem["problem"], steps + [result[idx][1]], -1).item()
+            highest_reward_base = max(rewards)
+            highest_reward_base_idx = rewards.index(highest_reward_base)
+            
             steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
+            
+            if reward_steered > highest_reward_base:
+                print("Steered reward: ", reward_steered, "Highest base reward: ", highest_reward_base)
+                print("We are steering the model to the right direction")
+                # steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
+            else:
+                print("Steered reward: ", reward_steered, "Highest base reward: ", highest_reward_base)
+                print("We are steering to base step")
+                # steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[highest_reward_base_idx])
         else:
             steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[0])
     
@@ -416,7 +430,7 @@ def process_problem_icv_prefix(problem_id):
 
 if __name__ == "__main__":
     acc = 0
-    for problem_id in tqdm.tqdm(range(28,num_problems)):
+    for problem_id in tqdm.tqdm(range(num_problems)):
         correct = process_problem_icv_prefix(problem_id)
         acc += correct
         print(f"Accuracy: {acc / (problem_id+1)}")

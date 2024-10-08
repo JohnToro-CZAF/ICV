@@ -337,9 +337,16 @@ class RewardProbInference(BaseProbInference):
 
     @staticmethod
     def get_reward(model, inputs, rewards, rank=1):
-        print("Getting reward ICV")
+        # print("Getting reward ICV")
         hidden_states = RewardProbInference.get_hiddenstates(model, inputs)
-        rewards = [reward / sum(rewards) for reward in rewards]
+        # rewards = [reward / sum(rewards) for reward in rewards]
+        
+        mean_reward = sum(rewards) / len(rewards)
+        relative_rewards = [reward - mean_reward for reward in rewards]
+        max_abs_reward = max([abs(reward) for reward in relative_rewards])
+        rewards = [reward / max_abs_reward for reward in relative_rewards]
+        
+        
         num_demonstration = len(hidden_states)
 
         hidden_states_all = []
@@ -355,7 +362,7 @@ class RewardProbInference(BaseProbInference):
         fit_data = torch.stack(hidden_states_all)
         weighted_fit_data = torch.stack(weighted_hidden_states_all)
         pca = PCA(n_components=rank).fit(weighted_fit_data.float())
-        print(pca.components_.shape)
+        # print(pca.components_.shape)
         eval_data = pca.transform(fit_data.float())
         h_pca = pca.inverse_transform(eval_data)
         
@@ -365,30 +372,40 @@ class RewardProbInference(BaseProbInference):
         return directions
     
     @staticmethod
-    def obtain_icv_rewarded_vllm(hidden_states: List[Tuple[torch.Tensor, torch.Tensor]], rewards, rank=1):
-        print("Getting reward ICV")
-        rewards = [reward / sum(rewards) for reward in rewards]
+    def obtain_icv_rewarded_vllm(hidden_states: List[torch.Tensor], rewards, rank=1):
+        # print("Getting reward ICV")
+        # rewards = [reward / sum(rewards) for reward in rewards]
+        mean_reward = sum(rewards) / len(rewards)
+        relative_rewards = [reward - mean_reward for reward in rewards]
+        # print(relative_rewards)
+        max_abs_reward = max([abs(reward) for reward in relative_rewards])
+        rewards = [reward / (max_abs_reward+1e-5) for reward in relative_rewards]
+        
+        mean_hidden_state = torch.mean(torch.stack([hidden_state.view(-1) for hidden_state in hidden_states]), dim=0)
+        diff_states = [hidden_state.view(-1) - mean_hidden_state for hidden_state in hidden_states]
+        print(rewards)
+        
         num_demonstration = len(hidden_states)
 
         hidden_states_all = []
         weighted_hidden_states_all = []
 
         for demonstration_id in range(num_demonstration):
-            h = hidden_states[demonstration_id][1].view(-1) - hidden_states[demonstration_id][0].view(-1)
-            hidden_states_all.append(h)
+            # h = hidden_states[demonstration_id][1].view(-1) - hidden_states[demonstration_id][0].view(-1)
+            # hidden_states_all.append(h)
             
             # Weighted by rewards (TODO: should we normalize the rewards or give negative rewards?)
-            weighted_h = rewards[demonstration_id] * h
+            weighted_h = rewards[demonstration_id] * diff_states[demonstration_id]
             weighted_hidden_states_all.append(weighted_h)
-        fit_data = torch.stack(hidden_states_all)
+        # fit_data = torch.stack(hidden_states_all)
         weighted_fit_data = torch.stack(weighted_hidden_states_all)
         pca = PCA(n_components=rank).fit(weighted_fit_data.float())
-        print(pca.components_.shape)
-        eval_data = pca.transform(fit_data.float())
-        h_pca = pca.inverse_transform(eval_data)
+        # print(pca.components_.shape)
+        # eval_data = pca.transform(fit_data.float())
+        # h_pca = pca.inverse_transform(eval_data)
         
-        direction = (pca.components_.sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1))
-        directions = [(pca.components_[i].sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1)) for i in range(len(pca.components_))]
+        # direction = (pca.components_.sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0][0].size(0), hidden_states[0][0].size(1))
+        directions = [(pca.components_[i].sum(axis=0, keepdims=True) + pca.mean_).mean(0).view(hidden_states[0].size(0), hidden_states[0].size(1)) for i in range(len(pca.components_))]
 
         return directions
     

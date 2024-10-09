@@ -20,6 +20,7 @@ import concurrent
 from sllm.value_functions.step_wise import StepWiseValueFunction
 from sllm.envs.math.utils import is_equiv
 from sllm.envs.base_env import BaseEnv
+import matplotlib.pyplot as plt
 
 ANS_RE = re.compile("\\\\boxed{(.*)}")
 
@@ -309,9 +310,56 @@ def multisampling(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tens
         responses.append((sampled_text, prompt_hidden, sampled_hidden))
     return responses
 
+def multisampling_icv(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tensor]:
+    text = "".join(steps)
+    text += f"### Step {len(steps)}: "
+    prompts = [(text,
+                SamplingParams(temperature=0.65,
+                                 max_tokens=600,
+                                    stop=["###"]),
+                ControlVectorRequest("chaotic", 1, cv_path, scale=0.12)) for _ in range(nsteps)]
+    request_id = 0
+    results = set()
+    while prompts or engine.has_unfinished_requests():
+        if prompts:
+            prompt, sampling_params, cv_request = prompts.pop(0)
+            engine.add_request(str(request_id),
+                               prompt,
+                               sampling_params,
+                               control_vector_request=cv_request)
+            request_id += 1
+
+        request_outputs = engine.step()
+        for request_output in request_outputs:
+            if request_output.finished or request_output.outputs[0].prompt_hidden_states != None:
+                results.add((request_output.request_id, request_output.outputs[0].text, request_output.outputs[0].hidden_states, request_output.outputs[0].prompt_hidden_states if request_output.outputs[0].prompt_hidden_states != None else None))
+    
+    responses = []
+    for req_id in range(nsteps):
+        req_results = []
+        for res in results:
+            if res[0] == str(req_id):
+                req_results.append(res)
+        # print("Req_id: ", req_id, "Req_results: ", req_results)
+        prompt_hidden = None
+        sampled_text  = ""
+        sampled_hidden = None
+        for result in req_results:
+            if result[-1] is not None:
+                prompt_hidden = result[-1]
+            else:
+                sampled_text = result[1]                                                    
+                sampled_hidden = result[2]
+        # assert prompt_hidden is not None and sampled_text is not None
+        assert sampled_text is not None, f"Sampled text is None, results: {results}"
+        # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
+        responses.append((sampled_text, prompt_hidden, sampled_hidden))
+    
+    return responses
+
 engine_args = EngineArgs(model=MODEL_PATH, enable_control_vector=True, gpu_memory_utilization=0.95, return_hidden_states=True, disable_log_stats=True)
 engine = LLMEngine.from_engine_args(engine_args)
-n_samples = 4
+n_samples = 8
 num_problems = 100
 n_components = 4
 SEED = 42
@@ -347,72 +395,91 @@ def process_problem_icv_prefix(problem_id):
     steps = [prompt + example + solved_prompt.format(problem=problem["problem"]) + "\n\n"]
     step_prefix = "### Step "
     solved = False
-    while not solved:
+    
+    random_step = np.random.choice(list(range(1,6)))
+    
+    while True:
         hidden_states = []
         possible_steps = []
-        import time
-        t0 = time.time()
-        u = multisampling(engine, steps, n_samples)
-        for s in u:
-            text, xs, ys = s
-            # text, x, y = s
-            possible_steps.append(text)
-            x,y = xs[-1], ys[-1]
-            hidden_states.append((x,y))
-            # hidden_states.append(y)
-        t1 = time.time()
-        print("Time: ", t1 - t0)
-        rewards = []
-        for text in possible_steps:
-            rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
-        # icvs = task_agent.obtain_icv_rewarded_vllm(hidden_states, rewards, n_components)
-        icvs = task_agent.obtain_icv_vllm(hidden_states, n_components)
-        # icvs = task_agent.obtain_icv_vllm(hidden_states)
-        icv_steps = []
-        icv_rewards = []
-        for direction in icvs:
-            export_gguf(cv_path, direction, model) # export the control vector for the first PCA axis only
-            result = sampling_icv(engine, steps)
-            idx = 0
-            for id, res in enumerate(result):
-                if res[-1] == None:
-                    idx = id
-            if "\\box" in result[idx][1] or "box" in result[idx][1]:
-                solved = True
-                print("Solved")
-            if result[idx][1] is not None:
-                icv_step = result[idx][1]
+        if len(steps) != random_step:
+            
+            import time 
+            start = time.time()
+            
+            next_step = sampling(engine, steps)
+            
+            print("Time: ", time.time() - start)
+            text, xs, ys = next_step
+            steps.append(text)
+        else:
+            
+            import time
+            start = time.time()
+            u = multisampling(engine, steps, n_samples)  
+            print("Time for base sampling: ", time.time() - start)
+        
+            for s in u:
+                text, xs, ys = s
+                possible_steps.append(text)
+                x,y = xs[-1], ys[-1]
+                hidden_states.append((x,y))
+            
+            base_rewards = []
+            
+            start = time.time()
+            for text in possible_steps:
+                base_rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
+            print("Time for computing rewards: ", time.time() - start)
+            
+            top_4_idx = np.argsort(base_rewards)[-4:]
+            hidden_states = [hidden_states[idx] for idx in top_4_idx]
+            
+            average_base_reward = np.mean(base_rewards)
+            
+            icvs = task_agent.obtain_icv_vllm(hidden_states, n_components)
+
+            average_icvs_reward = []
+            average_1st_icv_reward = 0
+            
+            for idx, direction in enumerate(icvs):
+                icv_steps = []
+                icv_rewards = []
+                export_gguf(cv_path, direction, model) 
+                
+                start = time.time()
+                result = multisampling_icv(engine, steps, n_samples)
+                print("Time for ICV sampling: ", time.time() - start)
+                
+                icv_step = result[idx][0]
                 icv_steps.append(icv_step)
                 icv_reward = compute_reward(problem["problem"], steps + [icv_step], -1).item()
                 icv_rewards.append(icv_reward)
-        
-        icv_max_direction = icv_rewards.index(max(icv_rewards))
-        print("Max direction: ", icv_max_direction)
-        print("Max reward: ", max(icv_rewards))
-        icv_max_step = icv_steps[icv_max_direction]
-        
-        if icv_max_step is not None:
-            steps.append(step_prefix + str(len(steps)) + ": " + result[idx][1])
-        
-            if max(icv_rewards) > max(rewards):
-                print("Steered reward: ", max(icv_rewards), "Highest base reward: ", max(rewards))
-                print("We are steering the model to the right direction")
-            else:
-                print("Steered reward: ", max(icv_rewards), "Highest base reward: ", max(rewards))
-                print("We are steering to base step")
-        else:
-            steps.append(step_prefix + str(len(steps)) + ": " + possible_steps[np.argmax(rewards)])
+                avereage_icv_reward = np.mean(icv_rewards)
+                average_icvs_reward.append(avereage_icv_reward)
+                
+                if idx == 0:
+                    average_1st_icv_reward = avereage_icv_reward
+            
+            max_average_icvs_reward = np.max(average_icvs_reward)
+            
+            print("Max Average direction: ", max_average_icvs_reward)
+            print("Average 1st direction: ", average_1st_icv_reward)
+            print("Average base reward: ", average_base_reward)
+            break
     
-    answer = extract_answer("".join(steps[1:]))
-    print("Answer: ", answer, "Solution: ", problem["solution"])
-    correct = env.check_extracted(answer, problem)
-    return int(correct)
+    return average_base_reward, average_1st_icv_reward, max_average_icvs_reward
 
 if __name__ == "__main__":
-    acc = 0
+    results = []
     for problem_id in tqdm.tqdm(range(num_problems)):
-        correct = process_problem_icv_prefix(problem_id)
-        acc += correct
-        print(f"Accuracy: {acc / (problem_id+1)}")
-
-    print(f"Accuracy: {acc / num_problems}")
+        results.append(process_problem_icv_prefix(problem_id))
+        
+    # plot the results
+    base_rewards = [result[0] for result in results]
+    first_icv_rewards = [result[1] for result in results]
+    max_icv_rewards = [result[2] for result in results]
+    
+    plt.plot(base_rewards, label="Base rewards")
+    plt.plot(first_icv_rewards, label="First ICV rewards")
+    plt.plot(max_icv_rewards, label="Max ICV rewards")
+    plt.savefig("rewards_across_problems.png")

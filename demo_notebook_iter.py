@@ -242,7 +242,7 @@ def sampling(engine, steps:List[str]) -> Union[str, torch.Tensor]:
     # first prompt with a control vector and second without.
     text  = "".join(steps)
     text += f"### Step {len(steps)}: "
-    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=700, stop=["###"]), None)]
+    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=700), None)]
     request_id = 0
     results = set()
     while prompts or engine.has_unfinished_requests():
@@ -276,7 +276,7 @@ def multisampling(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tens
     # first prompt with a control vector and second without.
     text  = "".join(steps)
     text += f"### Step {len(steps)}: "
-    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=700, stop=["###"]), None) for _ in range(nsteps)]
+    prompts = [(text,SamplingParams(temperature=0.65,max_tokens=2000), None) for _ in range(nsteps)]
     request_id = 0
     results = set()
     while prompts or engine.has_unfinished_requests():
@@ -320,9 +320,9 @@ def multisampling_icv(engine, steps:List[str], nsteps: int, idx: int) -> Union[s
     text += f"### Step {len(steps)}: "
     prompts = [(text,
                 SamplingParams(temperature=0.65,
-                                 max_tokens=600,
-                                    stop=["###"]),
-                ControlVectorRequest("chaotic", idx, cv_path, scale=0.10)) for _ in range(nsteps)]
+                                 max_tokens=2000,
+                                 repetition_penalty=1.0),
+                ControlVectorRequest("chaotic", idx, cv_path, scale=0.1)) for _ in range(nsteps)]
     request_id = 0
     results = set()
     while prompts or engine.has_unfinished_requests():
@@ -379,16 +379,15 @@ TaskHandler = load_task("reward")
 task_agent = TaskHandler("1.0.0")
 
 example = """To solve for the perimeter of pentagon \\(ABCDP\\), we need to determine the lengths of all its sides. 
-            We are given that \\(P\\) is the midpoint of \\(\\overline{BD}\\), \\(AP = BP = 4\\), \\(\\overline{AP} \\perp \\overline{BD}\\), \\(\\overline{BD} \\perp \\overline{DC}\\), and \\(\\overline{AB} \\perp \\overline{BC}\\).\n\n
-            ### Step 1: Determine the coordinate
-            ### Step 2: Determine the length of \\(\\overline{BD}\\)\nSince \\(P\\) is the midpoint, the coordinates of \\(P\\) being \\((4, 0)\\) imply:\n\\[\nP = \\left( \\frac{4 + 4}{2}, \\frac{y_B + (-y_B)}{2} \\right) = (4, 0)\n\\]\nThis confirms the midpoint calculation.\n\n
-            ### Step 3: Determine the length of \\(\\overline{BD}\\)\nUsing the distance formula for \\(\\overline{BD}\\):\n\\[\nBD = \\sqrt{(4 - 4)^2 + (y_B - (-y_B))^2} = \\sqrt{0 + (2y_B)^2} = 2y_B\n\\]\n\nGivenes of points\nGiven that \\(AP = BP = 4\\) and \\(\\overline{AP} \\perp \\overline{BD}\\), we place point \\(A\\) at the origin \\((0, 0)\\) and point \\(P\\) at \\((4, 0)\\) since \\(AP\\) is horizontal and equal to 4.\n\nSince \\(P\\) is the midpoint of \\(\\overline{BD}\\), we denote the coordinates of \\(B\\) and \\(D\\) as follows:\n- Let \\(B = (4, y_B)\\)\n- Let \\(D = (4, -y_B)\\)\n\n \\(BP = 4\\):\n\\[\nBP = \\sqrt{(4 - 4)^2 + (y_B - 0)^2} = y_B = 4\n\\]\n\nThus, \\(BD = 2y_B = 2 \\times 4 = 8\\).\n\n
-            ### Step 4: Determine the length of \\(\\overline{DC}\\)\nSince \\(\\overline{BD} \\perp \\overline{DC}\\), \\(D = (4, -4)\\) and \\(C\\) is directly below \\(D\\) with the same x-coordinate, we place \\(C\\) at \\((4, -8)\\).\n\n
-            ### Step 5: Determine the length of \\(\\overline{BC}\\)\nUsing the distance formula for \\(\\overline{BC}\\):\n\\[\nBC = \\sqrt{(4 - 4)^2 + (-8 - 4)^2} = \\sqrt{0 + (-12)^2} = 12\n\\]\n\n
-            ### Step 6: Determine the length of \\(\\overline{AB}\\)\nSince \\(\\overline{AB} \\perp \\overline{BC}\\) and \\(A = (0, 0)\\), \\(B = (4, 4)\\):\n\\[\nAB = \\sqrt{(4 - 0)^2 + (4 - 0)^2} = \\sqrt{16 + 16} = \\sqrt{32} = 4\\sqrt{2}\n\\]\n\n
-            ### Step 7: Calculate the perimeter of pentagon \\(ABCDP\\)\nThe perimeter is the sum of all sides:\n\\[\nAB + BP + PD + DC + CA\n\\]\n\nWe already know:\n\\[\nAB = 4\\sqrt{2}, \\quad BP = 4, \\quad PD = 4, \\quad DC = 12, \\quad CA = 4\n\\]\n\nThus, the perimeter is:\n\\[\n4\\sqrt{2} + 4 + 4 + 12 + 4 = 4\\sqrt{2} + 24\n\\]\n\n
-            ### Final Answer\n\\[\n\\boxed{4\\sqrt{2} + 24}\n\\]
-            """
+We are given that \\(P\\) is the midpoint of \\(\\overline{BD}\\), \\(AP = BP = 4\\), \\(\\overline{AP} \\perp \\overline{BD}\\), \\(\\overline{BD} \\perp \\overline{DC}\\), and \\(\\overline{AB} \\perp \\overline{BC}\\).\n\n
+### Step 1: Determine the coordinate
+### Step 2: Determine the length of \\(\\overline{BD}\\)\nSince \\(P\\) is the midpoint, the coordinates of \\(P\\) being \\((4, 0)\\) imply:\n\\[\nP = \\left( \\frac{4 + 4}{2}, \\frac{y_B + (-y_B)}{2} \\right) = (4, 0)\n\\]\nThis confirms the midpoint calculation.\n\n
+### Step 3: Determine the length of \\(\\overline{BD}\\)\nUsing the distance formula for \\(\\overline{BD}\\):\n\\[\nBD = \\sqrt{(4 - 4)^2 + (y_B - (-y_B))^2} = \\sqrt{0 + (2y_B)^2} = 2y_B\n\\]\n\nGivenes of points\nGiven that \\(AP = BP = 4\\) and \\(\\overline{AP} \\perp \\overline{BD}\\), we place point \\(A\\) at the origin \\((0, 0)\\) and point \\(P\\) at \\((4, 0)\\) since \\(AP\\) is horizontal and equal to 4.\n\nSince \\(P\\) is the midpoint of \\(\\overline{BD}\\), we denote the coordinates of \\(B\\) and \\(D\\) as follows:\n- Let \\(B = (4, y_B)\\)\n- Let \\(D = (4, -y_B)\\)\n\n \\(BP = 4\\):\n\\[\nBP = \\sqrt{(4 - 4)^2 + (y_B - 0)^2} = y_B = 4\n\\]\n\nThus, \\(BD = 2y_B = 2 \\times 4 = 8\\).\n\n
+### Step 4: Determine the length of \\(\\overline{DC}\\)\nSince \\(\\overline{BD} \\perp \\overline{DC}\\), \\(D = (4, -4)\\) and \\(C\\) is directly below \\(D\\) with the same x-coordinate, we place \\(C\\) at \\((4, -8)\\).\n\n
+### Step 5: Determine the length of \\(\\overline{BC}\\)\nUsing the distance formula for \\(\\overline{BC}\\):\n\\[\nBC = \\sqrt{(4 - 4)^2 + (-8 - 4)^2} = \\sqrt{0 + (-12)^2} = 12\n\\]\n\n
+### Step 6: Determine the length of \\(\\overline{AB}\\)\nSince \\(\\overline{AB} \\perp \\overline{BC}\\) and \\(A = (0, 0)\\), \\(B = (4, 4)\\):\n\\[\nAB = \\sqrt{(4 - 0)^2 + (4 - 0)^2} = \\sqrt{16 + 16} = \\sqrt{32} = 4\\sqrt{2}\n\\]\n\n
+### Step 7: Calculate the perimeter of pentagon \\(ABCDP\\)\nThe perimeter is the sum of all sides:\n\\[\nAB + BP + PD + DC + CA\n\\]\n\nWe already know:\n\\[\nAB = 4\\sqrt{2}, \\quad BP = 4, \\quad PD = 4, \\quad DC = 12, \\quad CA = 4\n\\]\n\nThus, the perimeter is:\n\\[\n4\\sqrt{2} + 4 + 4 + 12 + 4 = 4\\sqrt{2} + 24\n\\]\n\n
+### Final Answer\n\\[\n\\boxed{4\\sqrt{2} + 24}\n\\]"""
             
 prompt = "You are a great mathematics solver that consider reflection, analogy and multiple approaches to solve the problem. Here is an example of a formatted solution to a math problem: \n\n"
 solved_prompt = ".Solve the following math problem step-by-step. \n\nProblem: {problem} \n\nSolution:"
@@ -410,146 +409,132 @@ def compute_difference(embeddings_1, embeddings_2):
     difference_score = 1 - avg_similarity  # Difference is the inverse of similarity
     return difference_score
 
-def process_problem_icv_prefix(problem_id, encoding_model):
+def split(text):
+    return re.split(r"### Step \d+: ", text)
+
+def process_problem_icv_per_iteration(problem, base_steps, problem_id, iteration_id, icvs, hidden_states, all_rewards, mean_base_reward):
+    
+
+    # possible_sols = [] 
+    average_icvs_reward = []
+    all_icvs_steps = []
+    average_1st_icv_reward = 0
+    
+    # all_rewards = []
+    
+    
+    for idx, direction in enumerate(icvs):
+        icv_steps_one_direction = []
+        icv_rewards = []
+        export_gguf(cv_path, direction, model) 
+        results = multisampling_icv(engine, base_steps, n_samples, problem_id*iteration_id+1)
+        
+        for result in results:               
+            icv_steps = result[0]
+            xs, ys = result[1], result[2]
+            x,y = xs[-1], ys[-1]
+            hidden_states.append((x,y))
+            icv_steps = split(icv_steps)
+            print("ICV steps: ", icv_steps)
+            icv_steps_one_direction.append(icv_steps)
+            icv_reward = compute_reward(problem["problem"], icv_steps, -1).item()
+            icv_rewards.append(icv_reward)
+            all_rewards.append(icv_reward)
+            
+        print("ICV rewards: ", icv_rewards)
+        avereage_icv_reward = np.mean(icv_rewards)
+        average_icvs_reward.append(avereage_icv_reward)
+    
+        all_icvs_steps.extend(icv_steps_one_direction)
+        
+        if idx == 0:
+            average_1st_icv_reward = avereage_icv_reward
+    
+    max_average_icvs_reward = np.max(average_icvs_reward)
+    
+
+    # compute icvs for next iteration
+    
+    top_indices = [idx for idx in range(len(all_rewards)) if all_rewards[idx] > mean_base_reward]
+    print("Top indices: ", top_indices)
+    
+    
+    pos_hidden_states = [hidden_states[idx] for idx in top_indices]
+    neg_hidden_states = [hidden_states[idx] for idx in range(len(hidden_states)) if idx not in top_indices]
+    # top_sols = [possible_sols[idx] for idx in top_8_idx]
+    # low_sols = [possible_sols[idx] for idx in low_2_idx]
+    
+    
+    icvs = task_agent.obtain_icv_vllm(pos_hidden_states, neg_hidden_states, n_components)
+    
+    return icvs, (average_1st_icv_reward, max_average_icvs_reward)
+
+
+def process_initial(problem_id, hidden_states, all_rewards):
     problem = env.get_problem(problem_id)
     print("Problem: ", problem["problem"], "Solution: ", problem["solution"])
-    steps = [prompt + example + solved_prompt.format(problem=problem["problem"]) + "\n\n"]
-    step_prefix = "### Step "
-    solved = False
+    base_steps = [prompt + example + solved_prompt.format(problem=problem["problem"]) + "\n\n"]
     
-    random_step = np.random.choice(list(range(1,6)))
+    u = multisampling(engine, base_steps, n_samples)  
+    possible_steps = []
+    base_rewards = []
+    for s in u:
+        text, xs, ys = s
+        possible_steps.append(split(text))
+        x,y = xs[-1], ys[-1]
+        hidden_states.append((x,y))
     
-    while True:
-        hidden_states = []
-        possible_steps = []
-        if len(steps) != random_step:
-            next_step = sampling(engine, steps)
-            text, xs, ys = next_step
-            steps.append(text)
-        else: 
-            import time
-            start = time.time()
-            u = multisampling(engine, steps, n_samples)  
-        
-            for s in u:
-                text, xs, ys = s
-                possible_steps.append(text)
-                x,y = xs[-1], ys[-1]
-                hidden_states.append((x,y))
-            
-            base_rewards = []
-            
-            for text in possible_steps:
-                base_rewards.append(compute_reward(problem["problem"], steps + [text], -1).item())
-            
-            top_3_idx = np.argsort(base_rewards)[-4:]
-            low_2_idx = np.argsort(base_rewards)[:2]
-            
-            
-            pos_hidden_states = [hidden_states[idx] for idx in top_3_idx]
-            neg_hidden_states = [hidden_states[idx] for idx in low_2_idx]
-            top_steps = [possible_steps[idx] for idx in top_3_idx]
-            low_steps = [possible_steps[idx] for idx in range(len(possible_steps)) if idx in low_2_idx]
-            
-            average_base_reward = np.mean(base_rewards)
-            average_high_reward = np.mean([base_rewards[idx] for idx in top_3_idx])
-            
-            icvs = task_agent.obtain_icv_vllm(pos_hidden_states, neg_hidden_states, n_components)
-
-            average_icvs_reward = []
-            all_icvs_steps = []
-            
-            average_1st_icv_reward = 0
-            
-            for idx, direction in enumerate(icvs):
-                icv_steps = []
-                icv_rewards = []
-                export_gguf(cv_path, direction, model) 
-                
-                start = time.time()
-                results = multisampling_icv(engine, steps, n_samples, problem_id+1)
-                print("Time for ICV sampling: ", time.time() - start)
-                
-                for result in results:               
-                    icv_step = result[0]
-                    icv_steps.append(icv_step)
-                    icv_reward = compute_reward(problem["problem"], steps + [icv_step], -1).item()
-                    icv_rewards.append(icv_reward)
-                print("ICV rewards: ", icv_rewards)
-                avereage_icv_reward = np.mean(icv_rewards)
-                average_icvs_reward.append(avereage_icv_reward)
-                
-                all_icvs_steps.append(icv_steps)
-                
-                if idx == 0:
-                    average_1st_icv_reward = avereage_icv_reward
-                    average_1st_icv_reward = average_1st_icv_reward - average_base_reward
-
-                
-            max_average_icvs_reward = np.max(average_icvs_reward)
-            max_average_icvs_reward = max_average_icvs_reward - average_base_reward
-            
-            max_average_icv_id = np.argmax(average_icvs_reward)
-            max_average_icv_steps = all_icvs_steps[max_average_icv_id]
-            
-            self_diversity = compute_diversity(encoding_model.encode(max_average_icv_steps))
-            diversity_max_to_top = compute_difference(encoding_model.encode(max_average_icv_steps), encoding_model.encode(top_steps))
-            top_diversity = compute_diversity(encoding_model.encode(top_steps))
-            diversity_1_to_top = compute_difference(encoding_model.encode([all_icvs_steps[0]]), encoding_model.encode(top_steps))
-            diversity_low_to_top = compute_difference(encoding_model.encode(low_steps), encoding_model.encode(top_steps))
-            
-            print("Self diversity: ", self_diversity)
-            print("Diversity max to top: ", diversity_max_to_top)
-            print("Top diversity: ", top_diversity)
-            print("Diversity 1 to top: ", diversity_1_to_top)
-            print("Diversity low to top: ", diversity_low_to_top)
-            print("Max Average direction: ", max_average_icvs_reward)
-            print("Average 1st direction: ", average_1st_icv_reward)
-            print("Average base reward: ", average_base_reward)
-            print("Average high reward: ", average_high_reward)
-            break
+    for text in possible_steps:
+        base_rewards.append(compute_reward(problem["problem"], text, -1).item())
+        all_rewards.append(base_rewards[-1])
     
-    return average_base_reward, average_1st_icv_reward, max_average_icvs_reward, self_diversity, diversity_max_to_top, top_diversity, diversity_1_to_top, diversity_low_to_top
-
+    top_3_idx = np.argsort(base_rewards)[-3:]
+    low_2_idx = np.argsort(base_rewards)[:2]
+    pos_hidden_states = [hidden_states[idx] for idx in top_3_idx]
+    neg_hidden_states = [hidden_states[idx] for idx in low_2_idx]
+    icvs = task_agent.obtain_icv_vllm(pos_hidden_states, neg_hidden_states, n_components)
+    return icvs, np.mean(base_rewards), problem, base_steps
+    
 if __name__ == "__main__":
-    results = []
-    for problem_id in tqdm.tqdm(range(num_problems)):
-        results.append(process_problem_icv_prefix(problem_id, encoding_model))
+    for problem_id in tqdm.tqdm(range(1)):
+        hidden_states = []
+        all_rewards = []
         
-        # plot the results
-        base_rewards = [result[0] for result in results]
-        first_icv_rewards = [result[1] for result in results]
-        max_icv_rewards = [result[2] for result in results]
+        icvs, mean_base_reward, problem, base_steps = process_initial(problem_id, hidden_states, all_rewards)
+        mean_cutoff_reward = mean_base_reward
+        results = [] 
+        for iteration_id in range(10):
+            
+            icvs, _result = process_problem_icv_per_iteration(
+                problem, 
+                base_steps, 
+                problem_id, 
+                iteration_id, 
+                icvs, 
+                hidden_states, 
+                all_rewards, 
+            mean_cutoff_reward)
+            results.append(_result)
+            
+            first_icv_rewards = [result[0] for result in results]
+            max_icv_rewards = [result[1] for result in results]
+            avg_max_icv_rewards = np.mean(max_icv_rewards)
+            
+            
+            # hidden_states = []
+            # all_rewards = []
+            
+            # mean_cutoff_reward = max(avg_max_icv_rewards, mean_base_reward)
         
-        diversities = {"self_diversity": [result[3] for result in results], "diversity_max_to_top": [result[4] for result in results], "top_diversity": [result[5] for result in results], "diversity_1_to_top": [result[6] for result in results], "diversity_low_to_top": [result[7] for result in results]}
+            plt.figure(0)
+            plt.clf()
+            plt.plot([mean_base_reward for _ in range(len(first_icv_rewards))], label="Baseline", linestyle="--")
+            plt.plot([avg_max_icv_rewards for _ in range(len(first_icv_rewards))], label="Average max ICV rewards", linestyle="--")
+            plt.plot(first_icv_rewards, label="First ICV rewards")
+            plt.plot(max_icv_rewards, label="Max ICV rewards")
+            plt.legend()
+            plt.savefig("rewards_across_problems.png")
         
-        max_icv_rewards, first_icv_rewards = zip(*sorted(zip(max_icv_rewards, first_icv_rewards)))
-        max_icv_rewards = list(max_icv_rewards)
-        first_icv_rewards = list(first_icv_rewards)
-        
-        avg_max_icv_rewards = np.mean(max_icv_rewards)
-        
-    
-        plt.figure(0)
-        plt.clf()
-        # plt.plot(base_rewards, label="Base rewards")
-        plt.plot([0 for _ in range(len(base_rewards))], label="Baseline", linestyle="--")
-        plt.plot([avg_max_icv_rewards for _ in range(len(base_rewards))], label="Average max ICV rewards", linestyle="--")
-        plt.plot(first_icv_rewards, label="First ICV rewards")
-        plt.plot(max_icv_rewards, label="Max ICV rewards")
-        plt.legend()
-        plt.savefig("rewards_across_problems.png")
-        
-        # plot the diversities in another plot
-        plt.figure(1)
-        plt.clf()
-        plt.plot(diversities["self_diversity"], label="Self diversity")
-        plt.plot(diversities["diversity_max_to_top"], label="Distance max pca axis to top")
-        plt.plot(diversities["top_diversity"], label="Top diversity")
-        plt.plot(diversities["diversity_1_to_top"], label="Distance pca 1 to top")
-        plt.plot(diversities["diversity_low_to_top"], label="Distance low to top")
-        plt.legend()
-        plt.savefig("diversities_across_problems.png")
         
         # reset the figure
         

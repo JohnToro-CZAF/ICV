@@ -225,6 +225,53 @@ def sampling_icv(engine, steps):
     # print(results)
     return list(results)
 
+def eliminate_noise(engine, prompt, text):
+    special_characters = [
+        "~", " ~", "~ ", "!", " !", "! ", "@", " @", "@ ", "#", " #", "# ", 
+        "$", " $", "$ ", "%", " %", "% ", "^", " ^", "^ ", "&", " &", "& ", 
+        "*", " *", "* ", "(", " (", "( ", ")", " )", ") ", "_", " _", "_ ", 
+        "+", " +", "+ ", "`", " `", "` ", "-", " -", "- ", "=", " =", "= ", 
+        "{", " {", "{ ", "}", " }", "} ", "[", " [", "[ ", "]", " ]", "] ", 
+        "|", " |", "| ", "\\", " \\", "\\ ", ":", " :", ": ", ";", " ;", "; ", 
+        "\"", " \"", "\" ", "'", " '", "' ", "<", " <", "< ", ">", " >", "> ", 
+        ",", " ,", ", ", ".", " .", ". ", "?", " ?", "? ", "/", " /", "/ "
+    ]
+
+    def strip_special_characters(input_string):
+        for char in special_characters:
+            input_string = input_string.replace(char.strip(), '')
+        return input_string.strip()
+    
+    prompt += strip_special_characters(text)
+    prompts = [(prompt, SamplingParams(temperature=0.65, max_tokens=1), None)]
+    request_id = 0
+    results = set()
+    while prompts or engine.has_unfinished_requests():
+        if prompts:
+            prompt, sampling_params, cv_request = prompts.pop(0)
+            engine.add_request(str(request_id),
+                               prompt,
+                               sampling_params,
+                               control_vector_request=cv_request)
+            request_id += 1
+
+        request_outputs = engine.step()
+        for request_output in request_outputs:
+            if request_output.finished or request_output.outputs[0].prompt_hidden_states != None:
+                results.add((request_output.request_id, request_output.outputs[0].text, request_output.outputs[0].hidden_states, request_output.outputs[0].prompt_hidden_states if request_output.outputs[0].prompt_hidden_states != None else None))
+    prompt_hidden = None
+    sampled_text  = ""
+    sampled_hidden = None
+    for result in results:
+        if result[-1] is not None:
+            prompt_hidden = result[-1]
+        else:
+            sampled_text = result[1]                                                    
+            sampled_hidden = result[2]
+    
+    return prompt_hidden
+    
+    
 def export_gguf(path: os.PathLike[str] | str, directions: list[torch.Tensor], model):
     arch = "controlvector"
     directions = [directions[i] for i in range(1, len(directions))]
@@ -277,6 +324,7 @@ def multisampling(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tens
     text  = "".join(steps)
     text += f"### Step {len(steps)}: "
     prompts = [(text,SamplingParams(temperature=0.65,max_tokens=2000), None) for _ in range(nsteps)]
+    
     request_id = 0
     results = set()
     while prompts or engine.has_unfinished_requests():
@@ -312,6 +360,9 @@ def multisampling(engine, steps:List[str], nsteps: int) -> Union[str, torch.Tens
         # assert prompt_hidden is not None and sampled_text is not None
         assert sampled_text is not None, f"Sampled text is None, results: {results}"
         # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
+        
+        sampled_hidden = eliminate_noise(engine, text, sampled_text)
+        
         responses.append((sampled_text, prompt_hidden, sampled_hidden))
     return responses
 
@@ -358,6 +409,9 @@ def multisampling_icv(engine, steps:List[str], nsteps: int, idx: int) -> Union[s
         # assert prompt_hidden is not None and sampled_text is not None
         assert sampled_text is not None, f"Sampled text is None, results: {results}"
         # return f"### Step {len(steps)}: " + sampled_text, prompt_hidden, sampled_hidden
+        
+        sampled_hidden = eliminate_noise(engine, text, sampled_text)
+        
         responses.append((sampled_text, prompt_hidden, sampled_hidden))
     
     return responses
@@ -421,7 +475,6 @@ def process_problem_icv_per_iteration(problem, base_steps, problem_id, iteration
     average_1st_icv_reward = 0
     
     # all_rewards = []
-    
     
     for idx, direction in enumerate(icvs):
         icv_steps_one_direction = []
